@@ -2,49 +2,12 @@ package macaroon
 
 import (
 	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	"fmt"
-	"hash"
-	"io"
 
 	"golang.org/x/crypto/nacl/secretbox"
 )
-
-func keyedHash(key *[hashLen]byte, text []byte) *[hashLen]byte {
-	h := keyedHasher(key)
-	h.Write([]byte(text))
-	var sum [hashLen]byte
-	hashSum(h, &sum)
-	return &sum
-}
-
-func keyedHasher(key *[hashLen]byte) hash.Hash {
-	return hmac.New(sha256.New, key[:])
-}
-
-var keyGen = []byte("macaroons-key-generator")
-
-// makeKey derives a fixed length key from a variable
-// length key. The keyGen constant is the same
-// as that used in libmacaroons.
-func makeKey(variableKey []byte) *[keyLen]byte {
-	h := hmac.New(sha256.New, keyGen)
-	h.Write(variableKey)
-	var key [keyLen]byte
-	hashSum(h, &key)
-	return &key
-}
-
-// hashSum calls h.Sum to put the sum into
-// the given destination. It also sanity
-// checks that the result really is the expected
-// size.
-func hashSum(h hash.Hash, dest *[hashLen]byte) {
-	r := h.Sum(dest[:0])
-	if len(r) != len(dest) {
-		panic("hash size inconsistency")
-	}
-}
 
 const (
 	keyLen   = 32
@@ -52,40 +15,79 @@ const (
 	hashLen  = sha256.Size
 )
 
-func newNonce(r io.Reader) (*[nonceLen]byte, error) {
-	var nonce [nonceLen]byte
-	_, err := r.Read(nonce[:])
-	if err != nil {
-		return nil, fmt.Errorf("cannot generate random bytes: %v", err)
-	}
-	return &nonce, nil
+func hmacDigest(key []byte, text []byte) []byte {
+	h := hmac.New(sha256.New, key)
+	h.Write(text)
+	return h.Sum(nil)
 }
 
-func encrypt(key *[keyLen]byte, text *[hashLen]byte, r io.Reader) ([]byte, error) {
-	nonce, err := newNonce(r)
+func hmacConcat(key []byte, d1, d2 []byte) []byte {
+	var data [hashLen * 2]byte
+	copy(data[:hashLen], hmacDigest(key, d1))
+	copy(data[hashLen:], hmacDigest(key, d2))
+	return hmacDigest(key, data[:])
+}
+
+var macaroonKeySeed = []byte("macaroons-key-generator")
+
+// hashKey derives a fixed length key from a variable length key.
+//
+// The macaroonKeySeed constant is the same as that used in libmacaroons.
+func hashKey(keySeed []byte) []byte {
+	return hmacDigest(macaroonKeySeed, keySeed)
+}
+
+func generateNonce() (nonce [nonceLen]byte, err error) {
+	_, err = rand.Read(nonce[:])
+	if err != nil {
+		err = fmt.Errorf("generate nonce: %v", err)
+	}
+	return
+}
+
+func encryptKey(key []byte, message []byte) ([]byte, error) {
+	arrKey, err := bytesToKey(key)
 	if err != nil {
 		return nil, err
 	}
-	out := make([]byte, 0, len(nonce)+secretbox.Overhead+len(text))
+	nonce, err := generateNonce()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]byte, 0, len(nonce)+secretbox.Overhead+len(message))
 	out = append(out, nonce[:]...)
-	return secretbox.Seal(out, text[:], nonce, key), nil
+	return secretbox.Seal(out, message, &nonce, &arrKey), nil
 }
 
-func decrypt(key *[keyLen]byte, ciphertext []byte) (*[hashLen]byte, error) {
-	if len(ciphertext) < nonceLen+secretbox.Overhead {
+func decryptKey(key []byte, message []byte) ([]byte, error) {
+	if len(message) < nonceLen+secretbox.Overhead {
 		return nil, fmt.Errorf("message too short")
 	}
+
+	arrKey, err := bytesToKey(key)
+	if err != nil {
+		return nil, err
+	}
+
 	var nonce [nonceLen]byte
-	copy(nonce[:], ciphertext)
-	ciphertext = ciphertext[nonceLen:]
-	text, ok := secretbox.Open(nil, ciphertext, &nonce, key)
+	copy(nonce[:], message)
+	box := message[nonceLen:]
+
+	decryptedKey, ok := secretbox.Open(nil, box, &nonce, &arrKey)
 	if !ok {
 		return nil, fmt.Errorf("decryption failure")
 	}
-	if len(text) != hashLen {
-		return nil, fmt.Errorf("decrypted text is wrong length")
+	if len(decryptedKey) != hashLen {
+		return nil, fmt.Errorf("invalid length of a decrypted key: %d", len(decryptedKey))
 	}
-	var rtext [hashLen]byte
-	copy(rtext[:], text)
-	return &rtext, nil
+	return decryptedKey, nil
+}
+
+func bytesToKey(b []byte) (key [keyLen]byte, err error) {
+	if len(b) != keyLen {
+		err = fmt.Errorf("invalid key length %d expected %d", len(b), keyLen)
+		return
+	}
+	copy(key[:], b)
+	return
 }

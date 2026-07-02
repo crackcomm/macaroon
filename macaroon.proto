@@ -1,0 +1,45 @@
+// Copyright © 2026 Łukasz Kurowski. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+syntax = "proto3";
+
+package macaroon;
+
+option go_package = "ocxmr.go/third_party/go/macaroon";
+
+message Caveat {
+  // Id holds the caveat identifier.
+  //
+  // For first-party caveats this holds the condition;
+  // for third-party caveats this holds the encrypted third party caveat.
+  bytes id = 1;
+
+  // Verification ID holds the verification id of a third-party caveat.
+  bytes verification_id = 2;
+
+  // Location is a hint to a discharge location.
+  // It is not a part of the signature.
+  string location = 3;
+}
+
+message Macaroon {
+  // Location is a hint to the target's location.
+  optional string location = 1;
+
+  // Id by convention is required to be a public, opaque key identifier that
+  // maps to a secret root key known only to the target service.
+  bytes id = 2;
+
+  // Caveats of this macaroon.
+  repeated Caveat caveats = 3;
+
+  // Signature of the macaroon.
+  bytes signature = 4;
+}
+
+// Slice defines a collection of macaroons. By convention, the
+// first macaroon in the slice is a primary macaroon and the rest
+// are discharges for its third party caveats.
+message Slice {
+  repeated Macaroon macaroons = 1;
+}
